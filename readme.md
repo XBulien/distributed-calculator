@@ -28,13 +28,106 @@
 
 ▌Инструкции по Сборке и Запуску
 
-▌Вариант 1: Использование Make (Рекомендуется)
-
 1. Клонируйте репозиторий:
 
   
 ```
 bash
-    git clone 
-    cd 
+    git clone https://github.com/XBulien/distributed-calculator.git
+    cd distributed-calculator
+```
+
+2. Соберите компоненты:
+
+```
+bash
+  make build
+```
+ Эта команда соберет бинарные файлы оркестратора и агента.
+
+3. Запустите оркестратор:
+
+```
+bash
+   go run cmd/orchestrator/main.go
+```
+
+Это запустит оркестратор по адресу http://localhost:8080.
+
+4. Запустите агентов:
+
+```
+bash
+    go run .cmd/agent
+```
+
+ Это запустит агента, подключенного к оркестратору по адресу http://localhost:8080.
+  Вы можете настроить адрес оркестратора, используя переменную окружения ORCHESTRATOR_ADDRESS:
+
+▌Примеры Использования API
+
+Оркестратор предоставляет REST API для взаимодействия с системой. Вот несколько примеров команд curl:
+
+▌1. Отправьте запрос на вычисление
+
+
+```
+bash
+curl -X POST -H "Content-Type: application/json" -d '{"expression": "2+2*2"}' http://localhost:8080/api/v1/calculate
+```
+Ответ:
+```
+json
+{"id": "ваш-id-задачи"}
+```
+
+Замените ваш-id-задачи на фактический ID, возвращенный API.
+
+▌2. Получитe cписок всех выражений
+
+```
+bash
+curl http://localhost:8080/api/v1/expressions
+```
+Ответ:
+```
+json
+{
+ "expressions": [
+  {
+   "id": "expression-1",
+   "expression": "2+2*2",
+   "status": "Completed",
+   "result": 6
+  },
+  {
+   "id": "expression-2",
+   "expression": "3+3",
+   "status": "New",
+   "result": 0
+  }
+ ]
+}
+```
+
+▌3. Получить Выражение по ID
+
+```
+bash
+curl http://localhost:8080/api/v1/expressions/ваш-id-задачи
+```
+
+Ответ:
+```
+json
+{
+ "expression": [
+  {
+   "id": "ваш-id-задачи",
+   "expression": "2+2*2",
+   "status": "Completed",
+   "result": 6
+  }
+ ]
+}
 ```
