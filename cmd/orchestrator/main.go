@@ -6,8 +6,7 @@ import (
 )
 
 func main() {
-	// Инициализация и запуск оркестратора
-	server := orchestrator.NewServer()
+	server, _ := orchestrator.NewServer()
 	log.Println("Orchestrator is starting...")
 	server.Start()
 }

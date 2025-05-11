@@ -1,20 +1,21 @@
 package orchestrator
 
 import (
+	"fmt"
 	"strings"
-
-	"github.com/google/uuid" // Import для генерации UUID
+	"time"
 )
 
-// Task структура задачи в оркестраторе
 type Task struct {
-	ID         string  `json:"id"`         // Указывать теги для JSON обязательно, чтобы marshaling/unmarshaling работал корректно
-	Expression string  `json:"expression"` // Математическое выражение
-	Status     string  `json:"status"`     // Статусы лучше вынести в константы
-	Result     float64 `json:"result"`     // Результат
+	ID         string  `json:"id"`
+	Expression string  `json:"expression"`
+	Status     string  `json:"status"`
+	Result     float64 `json:"result"`
+	UserLogin  string  `json:"user_login"`
+	CreatedAt  string  `json:"created_at"`
+	UpdatedAt  string  `json:"updated_at"`
 }
 
-// Константы для статусов задач (дублирование из agent/worker.go - TODO: вынести в общий пакет)
 const (
 	StatusPending    = "Pending"
 	StatusNew        = "New"
@@ -23,24 +24,25 @@ const (
 	StatusFailed     = "Failed"
 )
 
-// CreateTask создает задачу с математическим выражением.
-func CreateTask(expression string) Task {
-	// Убираем пробелы из выражения
+func CreateTask(expression string, userLogin string) (Task, error) {
 	expression = strings.ReplaceAll(expression, " ", "")
 
-	// Создаем новую задачу
-	task := Task{
-		ID:         GenerateTaskID(), // Используем UUID для более надежной генерации ID
-		Expression: expression,
-		Status:     StatusNew, // Лучше начинать со статуса New, а не Pending (Pending - когда задача в очереди на обработку)
-		Result:     0,         //Инициализируем нулем, чтобы не было неожиданных значений
+	if expression == "" {
+		return Task{}, fmt.Errorf("expression cannot be empty")
 	}
 
-	return task
-}
+	now := time.Now().UTC()
+	timestamp := now.Format(time.RFC3339)
 
-// GenerateTaskID генерирует ID задачи (используем UUID).
-func GenerateTaskID() string {
-	// Генерация ID задачи (используем UUID для уникальности)
-	return uuid.New().String()
+	task := Task{
+		ID:         GenerateTaskID(),
+		Expression: expression,
+		Status:     StatusPending,
+		Result:     0,
+		UserLogin:  userLogin,
+		CreatedAt:  timestamp,
+		UpdatedAt:  timestamp,
+	}
+
+	return task, nil
 }

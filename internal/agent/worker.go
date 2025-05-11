@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"time"
@@ -11,184 +12,200 @@ import (
 	"github.com/Knetic/govaluate"
 )
 
-// Task структура задачи
 type Task struct {
-	ID         string  `json:"id"`         // Указывать теги для JSON обязательно, чтобы marshaling/unmarshaling работал корректно
-	Expression string  `json:"expression"` // Математическое выражение
-	Status     string  `json:"status"`     // Статусы лучше вынести в константы (см. ниже)
-	Result     float64 `json:"result"`     // Результат
+	ID         string  `json:"id"`
+	Expression string  `json:"expression"`
+	Status     string  `json:"status"`
+	Result     float64 `json:"result"`
+	UserLogin  string  `json:"user_login"`
+	CreatedAt  string  `json:"created_at"`
+	UpdatedAt  string  `json:"updated_at"`
 }
 
-// Константы для статусов задач
 const (
-	StatusNew        = "New"
-	StatusInProgress = "In Progress"
-	StatusCompleted  = "Completed"
-	StatusFailed     = "Failed" // Добавил статус Failed
+	StatusNew        = "new"
+	StatusInProgress = "in_progress"
+	StatusCompleted  = "completed"
+	StatusFailed     = "failed"
 )
 
 type Agent struct {
 	NumWorkers          int
-	OrchestratorAddress string // Добавим адрес оркестратора в структуру агента, чтобы можно было конфигурировать
+	OrchestratorAddress string
+	HTTPClient          *http.Client
 }
 
 func NewAgent(numWorkers int, orchestratorAddress string) *Agent {
 	return &Agent{
 		NumWorkers:          numWorkers,
 		OrchestratorAddress: orchestratorAddress,
+		HTTPClient: &http.Client{
+			Timeout: 30 * time.Second,
+		},
 	}
 }
 
-func (a *Agent) Start() error {
-	// Запуск нескольких горутин для обработки задач
+func (a *Agent) Start() {
 	for i := 0; i < a.NumWorkers; i++ {
-		go a.ProcessTasks()
+		go a.worker()
 	}
-
-	// Ожидаем завершения работы горутин (лучше использовать graceful shutdown с сигналами)
-	select {}
-	// TODO: Replace select {} with a mechanism to handle signals (e.g., os.Interrupt)
-	//       for graceful shutdown.  This will allow the agent to properly clean up
-	//       before exiting.
 }
 
-func (a *Agent) ProcessTasks() {
+func (a *Agent) worker() {
 	for {
-		// Получение задачи от оркестратора
-		task, err := a.GetTask()
+		task, err := a.getTask()
 		if err != nil {
-			log.Printf("Failed to get task: %v", err)
+			log.Printf("Error getting task: %v", err)
+			time.Sleep(2 * time.Second)
+			continue
+		}
+
+		if task == nil {
 			time.Sleep(1 * time.Second)
 			continue
 		}
 
-		// Устанавливаем статус задачи "In Progress"
-		task.Status = StatusInProgress // Используем константу
-		err = a.UpdateTaskStatus(task)
+		result, err := a.calculate(task.Expression)
 		if err != nil {
-			log.Printf("Failed to update task status to '%s' for %s: %v", StatusInProgress, task.ID, err)
-		}
-
-		// Выполнение вычисления
-		result, err := a.Calculate(task.Expression)
-		if err != nil {
-			log.Printf("Failed to calculate task %s: %v", task.ID, err)
-			task.Status = StatusFailed // Устанавливаем статус Failed при ошибке
-			a.UpdateTaskStatus(task)   // Обновляем статус в оркестраторе
-			time.Sleep(1 * time.Second)
-			continue
-		}
-
-		// Отправляем результат обратно в оркестратор
-		err = a.SendTaskResult(task.ID, result)
-		if err != nil {
-			log.Printf("Failed to send task result for %s: %v", task.ID, err)
-			task.Status = StatusFailed // Устанавливаем статус Failed при ошибке
-			a.UpdateTaskStatus(task)   // Обновляем статус в оркестраторе
-		} else {
-			// Устанавливаем статус задачи как "Completed"
-			task.Status = StatusCompleted // Используем константу
-			err = a.UpdateTaskStatus(task)
-			if err != nil {
-				log.Printf("Failed to update task status to '%s' for %s: %v", StatusCompleted, task.ID, err)
+			log.Printf("Calculation failed: %v", err)
+			if err := a.saveTaskResult(task, 0, StatusFailed, err.Error()); err != nil {
+				log.Printf("Failed to save failed task: %v", err)
 			}
+			continue
+		}
+
+		if err := a.saveTaskResult(task, result, StatusCompleted, ""); err != nil {
+			log.Printf("Failed to save completed task: %v", err)
 		}
 	}
 }
 
-func (a *Agent) UpdateTaskStatus(task *Task) error {
-	// Создание payload для обновления статуса задачи
+func (a *Agent) saveCompletedTask(task *Task, result float64) error {
 	payload := struct {
-		ID     string `json:"id"`
-		Status string `json:"status"`
+		ID     string  `json:"id"`
+		Result float64 `json:"result"`
 	}{
 		ID:     task.ID,
-		Status: task.Status,
+		Result: result,
 	}
 
-	// Отправка запроса на обновление статуса задачи в оркестратор
 	data, err := json.Marshal(payload)
 	if err != nil {
-		return fmt.Errorf("failed to marshal task status update: %w", err)
+		return fmt.Errorf("marshal failed: %w", err)
 	}
 
-	url := fmt.Sprintf("%s/internal/task/status", a.OrchestratorAddress) // Используем адрес оркестратора
-	resp, err := http.Post(url, "application/json", bytes.NewReader(data))
+	req, err := http.NewRequest(
+		"PUT",
+		a.OrchestratorAddress+"/internal/task",
+		bytes.NewReader(data),
+	)
 	if err != nil {
-		return fmt.Errorf("failed to send task status update: %w", err)
+		return fmt.Errorf("create request failed: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := a.HTTPClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		body := new(bytes.Buffer)
-		body.ReadFrom(resp.Body)
-		return fmt.Errorf("unexpected status code: %d, body: %s", resp.StatusCode, body.String()) // Log the response body for debugging
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("unexpected status code: %d, body: %s", resp.StatusCode, string(body))
+	}
+	return nil
+}
+
+func (a *Agent) saveFailedTask(task *Task, errorMsg string) error {
+	payload := struct {
+		ID     string `json:"id"`
+		Status string `json:"status"`
+		Error  string `json:"error,omitempty"`
+	}{
+		ID:     task.ID,
+		Status: StatusFailed,
+		Error:  errorMsg,
+	}
+
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("marshal failed: %w", err)
+	}
+
+	resp, err := a.HTTPClient.Post(
+		a.OrchestratorAddress+"/internal/task/fail",
+		"application/json",
+		bytes.NewReader(data),
+	)
+	if err != nil {
+		return fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+	}
+	return nil
+}
+
+func (a *Agent) getTask() (*Task, error) {
+	resp, err := a.HTTPClient.Get(a.OrchestratorAddress + "/internal/task")
+	if err != nil {
+		return nil, fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, nil
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+	}
+
+	var response struct {
+		Task *Task `json:"task"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
+		return nil, fmt.Errorf("decode failed: %w", err)
+	}
+
+	return response.Task, nil
+}
+
+func (a *Agent) updateTaskStatus(taskID, status string) error {
+	payload := struct {
+		ID     string `json:"id"`
+		Status string `json:"status"`
+	}{
+		ID:     taskID,
+		Status: status,
+	}
+
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("marshal failed: %w", err)
+	}
+
+	resp, err := a.HTTPClient.Post(
+		a.OrchestratorAddress+"/internal/task/status",
+		"application/json",
+		bytes.NewReader(data),
+	)
+	if err != nil {
+		return fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("unexpected status code: %d", resp.StatusCode)
 	}
 
 	return nil
 }
 
-func (a *Agent) GetTask() (*Task, error) {
-	// Запрос задачи у оркестратора
-	url := fmt.Sprintf("%s/internal/task", a.OrchestratorAddress) // Используем адрес оркестратора
-	resp, err := http.Get(url)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get task: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body := new(bytes.Buffer)
-		body.ReadFrom(resp.Body)
-		return nil, fmt.Errorf("unexpected status code: %d, body: %s", resp.StatusCode, body.String()) // Log the response body for debugging
-	}
-
-	var result struct {
-		Task *Task `json:"task"` // Указывать теги для JSON обязательно
-	}
-	err = json.NewDecoder(resp.Body).Decode(&result)
-	if err != nil {
-		return nil, fmt.Errorf("failed to decode task response: %w", err)
-	}
-
-	log.Printf("Received task: %+v\n", result.Task)
-	return result.Task, nil
-}
-
-// Функция для вычисления математического выражения
-func (a *Agent) Calculate(expression string) (float64, error) {
-	// Простой парсинг и вычисление выражения
-	result, err := EvaluateExpression(expression)
-	if err != nil {
-		return 0, fmt.Errorf("failed to evaluate expression: %w", err)
-	}
-
-	return result, nil
-}
-
-// Функция для вычисления выражения
-func EvaluateExpression(expression string) (float64, error) {
-	expr, err := govaluate.NewEvaluableExpression(expression)
-	if err != nil {
-		return 0, fmt.Errorf("failed to parse expression: %w", err)
-	}
-
-	result, err := expr.Evaluate(nil)
-	if err != nil {
-		return 0, fmt.Errorf("failed to evaluate expression: %w", err)
-	}
-
-	// Convert result to float64
-	floatResult, ok := result.(float64)
-	if !ok {
-		return 0, fmt.Errorf("expression did not evaluate to a number")
-	}
-
-	return floatResult, nil
-}
-
-func (a *Agent) SendTaskResult(taskID string, result float64) error {
-	// Создание payload для отправки результата
+func (a *Agent) sendResult(taskID string, result float64) error {
 	payload := struct {
 		ID     string  `json:"id"`
 		Result float64 `json:"result"`
@@ -197,25 +214,86 @@ func (a *Agent) SendTaskResult(taskID string, result float64) error {
 		Result: result,
 	}
 
-	// Маршализация payload в JSON
 	data, err := json.Marshal(payload)
 	if err != nil {
-		return fmt.Errorf("failed to marshal task result: %w", err)
+		return fmt.Errorf("marshal failed: %w", err)
 	}
 
-	// Отправка запроса с результатом в оркестратор
-	url := fmt.Sprintf("%s/internal/task/result", a.OrchestratorAddress) // Используем адрес оркестратора
-	resp, err := http.Post(url, "application/json", bytes.NewReader(data))
+	resp, err := a.HTTPClient.Post(
+		a.OrchestratorAddress+"/internal/task/result",
+		"application/json",
+		bytes.NewReader(data),
+	)
 	if err != nil {
-		return fmt.Errorf("failed to send task result: %w", err)
+		return fmt.Errorf("request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		body := new(bytes.Buffer)
-		body.ReadFrom(resp.Body)
-		return fmt.Errorf("unexpected status code: %d, body: %s", resp.StatusCode, body.String()) // Log the response body for debugging
+		return fmt.Errorf("unexpected status code: %d", resp.StatusCode)
 	}
 
+	return nil
+}
+
+func (a *Agent) calculate(expression string) (float64, error) {
+	expr, err := govaluate.NewEvaluableExpression(expression)
+	if err != nil {
+		return 0, fmt.Errorf("expression parse failed: %w", err)
+	}
+
+	result, err := expr.Evaluate(nil)
+	if err != nil {
+		return 0, fmt.Errorf("evaluation failed: %w", err)
+	}
+
+	switch v := result.(type) {
+	case float64:
+		return v, nil
+	case int:
+		return float64(v), nil
+	default:
+		return 0, fmt.Errorf("unexpected result type: %T", result)
+	}
+}
+
+func (a *Agent) saveTaskResult(task *Task, result float64, status string, errorMsg string) error {
+	payload := struct {
+		ID     string  `json:"id"`
+		Result float64 `json:"result,omitempty"`
+		Status string  `json:"status"`
+		Error  string  `json:"error,omitempty"`
+	}{
+		ID:     task.ID,
+		Result: result,
+		Status: status,
+		Error:  errorMsg,
+	}
+
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("marshal failed: %w", err)
+	}
+
+	req, err := http.NewRequest(
+		"PUT",
+		a.OrchestratorAddress+"/internal/task",
+		bytes.NewReader(data),
+	)
+	if err != nil {
+		return fmt.Errorf("create request failed: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := a.HTTPClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("unexpected status code: %d, body: %s", resp.StatusCode, string(body))
+	}
 	return nil
 }

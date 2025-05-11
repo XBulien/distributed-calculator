@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"fmt"
 	"sync"
+	"time"
 )
 
 type Storage struct {
@@ -22,7 +23,6 @@ func (s *Storage) GetAllTasks() []*Task {
 
 	var allTasks []*Task
 	for _, task := range s.tasks {
-		// Создаем копию задачи, чтобы избежать race condition
 		copyTask := *task
 		allTasks = append(allTasks, &copyTask)
 	}
@@ -36,29 +36,44 @@ func (s *Storage) GetTasksByExpressionID(expressionID string) []*Task {
 	var tasksForExpression []*Task
 	for _, task := range s.tasks {
 		if task.ID == expressionID {
-			// Создаем копию задачи, чтобы избежать race condition
 			copyTask := *task
 			tasksForExpression = append(tasksForExpression, &copyTask)
 		}
 	}
 	return tasksForExpression
 }
-
 func (s *Storage) GetPendingTask() *Task {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var oldestTask *Task
+	var oldestTime time.Time
 
 	for _, task := range s.tasks {
-		if task.Status == StatusNew { // Используем константу StatusNew
-			// Создаем копию задачи, чтобы избежать race condition
-			copyTask := *task
-			return &copyTask
+		taskTime, err := time.Parse(time.RFC3339, task.CreatedAt)
+		if err != nil {
+			continue
+		}
+
+		if task.Status == StatusPending &&
+			(oldestTask == nil || taskTime.Before(oldestTime)) {
+			oldestTask = task
+			oldestTime = taskTime
 		}
 	}
+
+	if oldestTask != nil {
+		copyTask := *oldestTask
+
+		oldestTask.Status = StatusInProgress
+		oldestTask.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+
+		return &copyTask
+	}
+
 	return nil
 }
 
-// AddTask добавляет задачу в хранилище
 func (s *Storage) AddTask(task *Task) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -72,14 +87,14 @@ func (s *Storage) AddTask(task *Task) error {
 }
 
 func (s *Storage) GetTaskByID(taskID string) *Task {
-	s.mu.RLock() // Используем RLock, так как только читаем задачу
+	s.mu.RLock()
 	defer s.mu.RUnlock()
 
 	task, ok := s.tasks[taskID]
 	if !ok {
-		return nil // Возвращаем nil, если задача не найдена
+		return nil
 	}
-	// Создаем копию задачи, чтобы избежать race condition
+
 	copyTask := *task
 	return &copyTask
 }
@@ -89,7 +104,7 @@ func (s *Storage) UpdateTask(task *Task) error {
 	defer s.mu.Unlock()
 
 	if _, exists := s.tasks[task.ID]; !exists {
-		return fmt.Errorf("task with ID %s does not exist", task.ID) // Обрабатываем случай, когда задача не найдена
+		return fmt.Errorf("task with ID %s does not exist", task.ID)
 	}
 
 	s.tasks[task.ID] = task
